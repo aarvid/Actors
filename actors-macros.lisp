@@ -15,4 +15,12 @@
 
 ;; --------------------------------------------------------------------
 
+;; LW Locks are more than twice as fast as spin-locks in this application
+(defmacro make-lock (&rest args)
+  `(mp:make-lock ,@args))
+
+(defmacro with-lock ((lock) &body body)
+  `(mp:with-lock (,lock)
+     ,@body))
+
 

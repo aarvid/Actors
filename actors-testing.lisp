@@ -22,7 +22,7 @@
             'done)
         (terminate)))))
 
-(defunc tst ()
+(defun tst ()
   (make-actor #:test () ()
     (pr self)
     (wait (a b c)
@@ -35,5 +35,17 @@
         (pause
           (pr 'done)
           (terminate)))))) ))
+(compile 'tst)
 (tst)
 
+
+
+(defun tst (n)
+  ;; Ans: about 10 usec/ spawn-exit elapsed time
+  (loop repeat n do
+        (spawn (lambda ()))))
+
+
+(let ()
+  (dotimes (ix 1000)
+    (spawn (lambda (ix) (pr ix)) ix)))

@@ -1,5 +1,7 @@
 #|
-Copyright 2017, Refined Audiometrics Laboratory, LLC
+MIT License Terms:
+
+Copyright (c) 2017, Refined Audiometrics Laboratory, LLC
 
 Permission is hereby granted, free of charge, to any person obtaining
 a copy of this software and associated documentation files (the
@@ -29,8 +31,9 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
   :components  ((:file "packages")
                 (:file "actors-macros")
                 (:file "actors-globals")
-                (:file "actors-queue")
                 (:file "actors")
+                (:file "actors-mbox-queue")
+                (:file "actors-comms")
                 (:file "actors-executive")
                 (:file "actors-user-macros")
                 (:file "actors-startup")

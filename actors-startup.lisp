@@ -1,5 +1,5 @@
 
-(in-package :actors)
+(in-package :actors-base)
 
 ;; ----------------------------------------------------------------------------
 
@@ -7,7 +7,9 @@
   (unless (directory-manager-p)
     (setf *actor-directory-manager*
           (make-actor :Actor-directory (&rest msg)
-              ((directory (make-hash-table :test 'equal)))
+              ((directory (make-hash-table
+                           :test 'equal
+                           :single-thread t)))
             (labels ((clean-up ()
                        (setf *actor-directory-manager* #'lw:do-nothing)
                        (terminate))

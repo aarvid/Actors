@@ -8,15 +8,20 @@
   (:use #:common-lisp)
   (:export
    #:gensym-like
-   #:anaphor))
+   #:anaphor
+   #:make-lock
+   #:with-lock))
 
 (defpackage #:actors-globals
   (:use #:common-lisp)
   (:export
+   #:actor-termination-condition
+   
    #:+nbr-execs+
    #:+max-pool+
    #:+heartbeat-interval+
    #:+maximum-age+
+   #:+actor-termination+
 
    #:*executive-processes*
    #:*executive-counter*
@@ -24,6 +29,7 @@
    #:*last-heartbeat*
    #:*muffle-exits*
    #:*current-actor*
+   #:*actor-ready-queue*
    #:*actor-directory-manager*
    #:*shared-printer-actor*
    
@@ -31,25 +37,10 @@
    #:blind-print
    ))
 
-(defpackage #:actors-queue
-  (:use #:common-lisp)
-  (:export
-   #:*actor-ready-queue*
-   #:add-queue
-   #:queue-empty-p
-   #:queue-empty
-   #:pop-queue
-   #:find-in-queue
-   #:queue-remove
-   #:make-lock
-   #:with-lock
-   ))
-
 (defpackage #:actors-base
   (:use #:common-lisp
    #:actors-macros
-   #:actors-globals
-   #:actors-queue)
+   #:actors-globals)
   (:export
    #:*current-actor*
    #:*muffle-exits*
@@ -61,6 +52,7 @@
    #:wait
    #:reset
    #:terminate
+   #:next
    #:kill-executives
    #:send
    #:ask
@@ -79,12 +71,15 @@
    #:with-locked-actor
    #:ensure-executives
    #:actor
+   #:actor-name
+   #:actor-lambda-list
+   #:actor-initial-behavior
+   #:actor-next-behavior
    #:actor-messages
    #:actor-next-messages
-   #:actor-timeout-timer
-   #:actor-name
    #:actor-residence
    #:actor-properties
+
    #:send-secondary
    #:add-actor
    
@@ -96,6 +91,11 @@
 
    #:register-actor
    #:unregister-actor
+
+   #:add-to-ready-queue
+   #:ready-queue-empty-p
+   #:empty-ready-queue
+   #:pop-ready-queue
    ))
 
 (defpackage #:actors-data-structs
@@ -135,7 +135,6 @@
   (:use #:common-lisp
    #:actors-macros
    #:actors-globals
-   #:actors-queue
    #:actors-base
    #:actors-data-structs
    #:actors-components
@@ -143,6 +142,8 @@
   (:nicknames #:ac)
   (:export
    #:actor
+   #:actor-name
+
    #:def-factory
    #:*current-actor*
    #:current-actor
@@ -185,8 +186,6 @@
 
    #:get-actor-property
    #:set-actor-property
-   #:actor-name
-   #:actor-properties
    
    #:pr
    #:defunc

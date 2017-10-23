@@ -16,10 +16,22 @@
 
 ;; --------------------------------------------------------------------
 
+(define-condition actor-termination-condition (serious-condition)
+  ())
+
+(defconstant +actor-termination+
+  (make-condition 'actor-termination-condition))
+
+;; --------------------------------------------------------------------
+
 (defvar *current-actor*  nil)
 
 (defun current-actor ()
   *current-actor*)
+
+(defvar *actor-ready-queue*  (mp:make-mailbox))
+
+;; --------------------------------------------------------------------
 
 (defvar *actor-directory-manager* #'lw:do-nothing)
 

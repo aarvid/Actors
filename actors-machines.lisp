@@ -107,6 +107,12 @@ process."
                         :reason :ABNORMAL
                         :arg    :TIMEOUT)))
 
+(defun actor-timeout-timer (actor)
+  (get-actor-property actor 'timeout-timer))
+
+(defsetf actor-timeout-timer (actor) (timer)
+  `(setf (get-actor-property ,actor 'timeout-timer) ,timer))
+         
 (defun unschedule-timeout (actor)
   (let ((timer (actor-timeout-timer actor)))
     (when timer
@@ -217,7 +223,7 @@ process."
 
 #|
 (kill-executives)
-(defunc tst (dt)
+(defun tst (dt)
   (let* ((x 15)
          (self :me!)
          (actor (perform-with-timeout msg 2
@@ -234,6 +240,7 @@ process."
     (send actor :print :hello)
     (send actor :quit)
     (pr x)))
+(compile 'tst)
 (tst 1)
 (let ((x (make-actor #:test (&rest msg)
              ()
@@ -355,6 +362,7 @@ process."
                         ,@(mapcan #`(,(car a1) (lambda (,msg)
                                                  ,(cadr a1)))
                                   groups)))
+                      (next)
                       )))
            (prog1
                (setf ,a!self (make-instance 'Actor
@@ -368,34 +376,37 @@ process."
 (editor:setup-indent "make-state-machine" 4)
 
 #|
-(let ((x  (make-state-machine :diddle msg
-              (val) :initial
-
-            (:initial (um:dcase msg
-                        (:echo (x)
-                         (print x))
-                        (:who  ()
-                         (print self))
-                        (:test (x)
-                         (setf val x)
-                         (new-state :one))
-                        (:quit ()
-                         (terminate))))
-            
-            (:one     (um:dcase msg
-                        (:try (x)
-                         (print (+ x val))
-                         (new-state :initial))
-                        (t (&rest _)
-                           (save-message msg)))))
-          ))
-  (send x :echo :This)
-  (send x :who)
-  (send x :test 15)
-  (send x :who)
-  (send x :echo :That)
-  (send x :try 32)
-  (send x :quit))
+(defun tst ()
+  (let ((x  (make-state-machine :diddle msg
+                (val) :initial
+              
+              (:initial (um:dcase msg
+                          (:echo (x)
+                           (pr x))
+                          (:who  ()
+                           (pr self))
+                          (:test (x)
+                           (setf val x)
+                           (new-state :one))
+                          (:quit ()
+                           (terminate))))
+              
+              (:one     (um:dcase msg
+                          (:try (x)
+                           (pr (+ x val))
+                           (new-state :initial))
+                          (t (&rest _)
+                             (save-message msg)))))
+            ))
+    (send x :echo :This)
+    (send x :who)
+    (send x :test 15)
+    (send x :who)
+    (send x :echo :That)
+    (send x :try 32)
+    (send x :quit)))
+(compile 'tst)
+(tst)
 
 (parse-state-handler
  (um:dcase msgx
