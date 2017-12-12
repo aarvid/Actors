@@ -5,12 +5,20 @@
 ;; NOTE: MP:MAILBOX supports multiple readers, not just multiple
 ;; writers. So use a mailbox for the FIFO Actor ready queue.
 
+(defun not-already-in-queue-p (actor)
+  ;; return true if not in queue, but also mark it as being in the
+  ;; ready queue if it wasn't
+  (sys:compare-and-swap (car (actor-residence actor)) nil t))
+
+(defun mark-not-in-queue (actor)
+  (setf (car (actor-residence actor)) nil))
+
 (defun add-to-ready-queue (actor)
-  ;; actor should already be locked
-  (setf (actor-residence actor) *actor-ready-queue*)
-  (mp:mailbox-send *actor-ready-queue* actor)
-  (unless *executive-processes*
-    (ensure-executives)))
+  (when (and (actor-behavior actor)
+             (not-already-in-queue-p actor))
+    (mp:mailbox-send *actor-ready-queue* actor)
+    (unless *executive-processes*
+      (ensure-executives))))
 
 (defun ready-queue-empty-p ()
   (mp:mailbox-empty-p *actor-ready-queue*))
@@ -29,12 +37,3 @@
 (defun pop-ready-queue ()
   (mp:mailbox-read *actor-ready-queue*))
 
-#|
-(defun find-in-queue (item queue &key (key 'identity) (test 'eql))
-  (declare (ignore item queue key test))
-  nil)
-
-(defun queue-remove (actor queue)
-  (declare (ignore actor queue))
-  nil)
-|#

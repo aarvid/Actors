@@ -39,7 +39,8 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
                 (:file "actors-startup")
                 (:file "actors-data-structs")
                 (:file "actors-components")
-                (:file "actors-machines"))
+                (:file "actors-machines")
+                (:file "futures"))
   :SERIAL T
   :depends-on   ("data-objects"
                  "optima"

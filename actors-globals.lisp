@@ -12,29 +12,20 @@
 (defconstant +maximum-age+        3)
 (defvar *heartbeat-timer*       nil)
 (defvar *last-heartbeat*          0)
-(defvar *muffle-exits*          nil)
 
 ;; --------------------------------------------------------------------
 
-(define-condition actor-termination-condition (serious-condition)
-  ())
-
-(defconstant +actor-termination+
-  (make-condition 'actor-termination-condition))
-
-;; --------------------------------------------------------------------
-
-(defvar *current-actor*  nil)
+(defvar *actor-ready-queue*  (mp:make-mailbox))
+(defvar *current-actor*      nil)
 
 (defun current-actor ()
   *current-actor*)
-
-(defvar *actor-ready-queue*  (mp:make-mailbox))
 
 ;; --------------------------------------------------------------------
 
 (defvar *actor-directory-manager* #'lw:do-nothing)
 
+;; --------------------------------------------------------------------
 
 (defun blind-print (cmd &rest items)
   (declare (ignore cmd))

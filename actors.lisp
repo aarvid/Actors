@@ -7,63 +7,60 @@
 ;; data that perform actions against arguments asynchronously sent to
 ;; them via non-blocking message sends.
 ;;
-;; For this implementation, Actor behavior (should) perform
-;; non-blocking sections of code against the message arguments before
-;; returning a new next-execution state to the executive process, in
-;; preparation for their next invocation.  Macro NEXT-TIME provides
-;; this next-execution state back to the executive. Actors can
-;; indicate alterations to their behavior for use on future message
-;; sends, or offer back the same behavior.  Only one invocation of an
-;; actor can occur at any one time, and so guarantees single-thread
-;; access to private state data.
+;; Actors are free to peform blocking waits in their body code. (just
+;; try to stop that from ever happening!). Stalled Actors
+;; could either be the result of blocking waits or from intensely
+;; compute bound activity.
 ;;
-;; [Note: There can be no enforcement of non-blocking protocol, but
-;; macros NEXT, PAUSE, and WAIT can help facilitate adherence to
-;; non-blocking code.
+;; Actors run under the supervision of a pool of Executive system
+;; threads. As Executives become tied up with their Actors performing
+;; stalling, a watchdog checks periodically and will spawn additional
+;; Executive threads to prevent other Actors from becoming stalled
+;; waiting to run.
 ;;
-;; But compute bound actors could still hog the system, even if they
-;; had been carefully crafted to avoid blocking behavior on I/O.
-;; Hence, see below, where we implement a heartbeat heuristic with a
-;; watchdog timer, and if all executives in the pool appear to be tied
-;; up, then a new executive is added to the pool.  Beyond some limit,
-;; this accumulation ceases with an error signal.]
+;; Actors can change their behavior for use on future message sends,
+;; but be mindful of the effect if you change its interface message
+;; arguments.
+;;
+;; Only one invocation of an actor can occur at any one time, and so
+;; guarantees single-thread access to private state data.
 ;;
 ;; Macro DEF-FACTORY defines an actor factory function, with initial
 ;; state data bindings, and behavior code, for a particular class of
 ;; actor. Calling a defined factory function actually constructs an
-;; Actor structure, gives the caller a chance to override initial
-;; private binding values, and enters the newly constucted Actor into
-;; the executive queue system.
-;;
-;; This package implements a system of green threads to run actors,
-;; [hence, the desire for non-blocking behavior] managed by a pool of
-;; executives operating as red threads in native OS threads. We strive
-;; for one executive per CPU core, but affinity cannot be assigned.
+;; Actor structure, giving the user a chance to override initial
+;; default private binding values, and enters the newly constucted
+;; Actor into the system.
 ;;
 ;; Execitives run whenever a ready actor is available. The executives
-;; will block waiting for ready actors, hence, the need for them to be
-;; red threads. Once a ready actor is obtained, the actor's behavior
-;; code runs on the same thread as the executive, blocking the
-;; executive from any further action until the actor returns its next
-;; run-state.
+;; will block waiting for ready actors. Once a ready actor is
+;; obtained, the actor's behavior code runs on the same thread as the
+;; executive, blocking the executive from any further action until the
+;; actor returns.
 ;;
-;; Extant Actors are placed into one of two queues - a wait queue, or
-;; a ready queue. The executives remove actors from the ready queue
-;; for execution of their behavior code, then return them to either
-;; the ready queue if more messages await, or to the wait queue.  A
-;; message send removes an actor from the wait queue and adds it to
-;; the ready queue.
+;; Extant Actors live in the heap and are placed into the system ready
+;; queue once a message is sent to them. The executives remove actors
+;; from the ready queue for execution of their behavior code, then
+;; return them to either the ready queue if more messages await, or
+;; back to the heap to await a new message.
 ;;
-;; Queues are managed in FIFO order so that fair round-robin
-;; scheduling occurs. There are no priority distinctions among actors.
-;; Actors in the ready queue can be executed by any available
-;; executive thread in the executive pool.
+;; Queues are managed in FIFO order, but an Actor that continuously
+;; receives messages while running will be kept running by its
+;; Executive until there are no remaining messages in the Actor's
+;; mailbox. Messages are handled in FIFO order of receipt. There is no
+;; selective retrieval from the Actor's mailbox. Every message is sent
+;; to the Actor for handling.
 ;;
-;; The queues are SMP-safe shared queues among all executive threads,
-;; using CAS spinlocks for queue access and modification.
+;; We prevent stalling of other Actors by way of having additional
+;; Executive threads to run them. There are no priority distinctions
+;; among actors.  Actors in the ready queue can be executed by any
+;; available Executive thread in the Executive Pool.
 ;;
-;;  (Wait Queue)
-;;       |<-- message send
+;; The system ready queue is an SMP-safe queue shared among all
+;; Executive threads and any other message sending threads located
+;; anywhere in the running Lisp image.
+;;
+;;  (an Actor) <-- message send
 ;;       |
 ;;       |        Executive - run actor code / wait for ready
 ;;       v       /
@@ -79,55 +76,14 @@
 ;; alteration by other code running in parallel on another OS thread.
 ;; Reentrant behavior code is unnecessary.
 ;;
-;; Actor behaviors must always return the actor back to the
-;; executives.  Their state indicates the mailbox on which it is
-;; awaiting more messages, and the next behavior code to run when a
-;; message arrives.  Macro NEXT-TIME, as the last evaluated form
-;; provides this information back to the executive.
-;;
-;; Returning a null mailbox to the executive indicates a desire only
-;; to pause, to allow other actors a chance to run, but the returning
-;; actor remains ready for execution afterward. This is arranged by
-;; use of macro PAUSE.
-;;
-;; Actor behaviors should be written in wait-free manner, or use one
-;; of the macros WAIT, PAUSE, NEXT-MESSAGE, RESET, or NEXT, as the last form
-;; executed, to yield back to the executive. The actor will be
-;; continued in the follow body code:
-;;
-;;    -- On receipt of the next message, for macro NEXT-MESSAGE and NEXT,
-;;        (NEXT retains the existing behavior,
-;;           while NEXT-MESSAGE specifies new behavior)
-;;
-;;    -- The next available run slot from the executive, for macro PAUSE,
-;;
-;;    -- The completion of blocking code, for macro WAIT.
-;;
-;; An actor that no longer wishes to participate should end with the
-;; TERMINATE macro. Actors can also be forcibly terminated with
-;; function REMOVE-ACTOR, although if the actor is presently runnng it
-;; will continue running until it returns to the executive, after
-;; which it will remain unschedulable.
-;;
-;; WAIT is used for blocking I/O, in which case the blocking code is
-;; spawned into another OS red thread for execution. That blocking
-;; code should return a value that the executive will message send to
-;; the waiting actor. If any errors occur in the blocking code they
-;; will be reflected back to the calling actor, instead of the
-;; expected message arguments.
-;;
-;; If an actor bombs out, the executive will log the error and
-;; terminate the actor. A terminated actor no longer participates with
-;; the ready & waiting queues, and its mailbox is zapped to prevent
-;; message sends to the actor from succeeding. This might cause a
-;; cascade of other actors to bomb out.
-;;
 ;; Message sends can refer to target actors by actual reference to an
-;; Actor structure, or by name, for a named actor. Direct references
-;; avoid the slowdown caused by a search of the queues for the
-;; associated actor. Obviously, actors should be given unique names if
-;; the named send protocol is chosen. Actors should be named with
-;; strings or symbols.
+;; Actor structure, or by name, for an actor registered in the Actor
+;; Directory. Using a name reference causes a lookup in the Actor
+;; Directory to locate the associated Actor instance.  Actors should
+;; be registered with the directory using string or interned symbol
+;; names.  Any other name will cause the attempted registration to be
+;; ignored. Actors are otherwise unnamed, as they correspond in the
+;; green-threads world to LAMBDA for the Lisp world.
 ;;
 ;; Communication with actors is facilitated by function GET, which
 ;; first sends a message, then awaits a response to a privately held
@@ -138,11 +94,10 @@
 ;; which the actor doesn't respond. While SEND is non-blocking, the
 ;; mailbox-read is.
 ;;
-;; SEND is non-blocking in both directions. SEND is overloaded as a
-;; method to further support non-blocking sending of messages through
-;; Reppy Channels, mp:mailboxes, and mp:procedures with
-;; proc-mailboxes, in addition to sending to actors either directly or
-;; by name lookup.
+;; SEND is always non-blocking. SEND is overloaded as a method to
+;; further support non-blocking sending of messages through Reppy
+;; Channels, mp:mailboxes, and mp:procedures with proc-mailboxes, in
+;; addition to sending to actors either directly or by name lookup.
 ;;
 ;; Doug Hoyt's DLAMBDA is an excellent mechanism for producing actors
 ;; which provide shared data structures, which the Actor system
@@ -165,66 +120,25 @@
 ;; --------------------------------------------------------------------
 
 (defclass actor ()
-  ((name
-    :initarg :name
-    :initform (error ":name must be specified")
-    :accessor actor-name
-    :documentation "Hold the name of actor")
-   ;; while all Actor instance are named, the name can be anything at
-   ;; all. However, if you want your Actor to be locatable by the
-   ;; Actor Directory Service, then the name must be either a String,
-   ;; or an interned Symbol. All names are searched for by upcasing
-   ;; their string form, so "this" and :THIS are the same thing as far
-   ;; as the directory is concerned. An uninterned symbol name like
-   ;; #:THIS will not be entered into the Actor Directory.
-   
-   (lambda-list
-    :initarg :lambda-list
-    :initform (error ":lambda-list must be specified")
-    :accessor actor-lambda-list
-    :documentation "Hold the lambda-list of actor")
-   ;; this only hold the lambda list at the time of Actor creation.
-   ;; Use of PAUSE, NEXT-MESSAGE, NEXT-TIME, WAIT, etc. can
-   ;; dynamically alter the true lambda list of the Actor.
-
-   (messages
+  ((messages
     :initform (mp:make-mailbox)
     :accessor actor-messages
     :documentation "Message stream sent to actor")
    ;; the main communications mailbox for use by SEND
-
-   (initial-behavior
-    :accessor actor-initial-behavior
-    :initarg :behav)
-   ;; initial-behavior holds the initial behavior of the Actor
-   ;; we retain this information for easy RESET back to initial state
-
-   (next-behavior
-    :accessor actor-next-behavior)
-   ;; next-behavior holds the behavior code to be run at the next
-   ;; invocation. It starts out with initial-behavior, but gets
-   ;; modified by NEXT-TIME, PAUSE, WAIT, and can be reset to the
-   ;; initial behavior with RESET.
    
-   (next-messages
-    :accessor actor-next-messages)
-   ;; next-messages holds a reference to the mailbox from which the
-   ;; next messages are anticipated. This is normally a copy of the
-   ;; MESSAGES slot value, but could be a reference to another private
-   ;; mailbox for sidechannel comms with blocking actors (WAIT), or
-   ;; NIL to indicate not waiting at all.
+   (behavior
+    :accessor actor-behavior
+    :initform nil
+    :initarg :behav)
+   ;; behavior holds the behavior of the Actor
 
    (residence
     :accessor actor-residence
-    :initform nil)
-   ;; residence records which queue (ready/waiting) in which the actor
-   ;; resides, or nil if not on any queue. Checking this slot is much
-   ;; faster than searching in the ready-queue.
-   ;;
-   ;; (N.B. there is no longer a wait-queue. That was too much of a
-   ;; slowdown in timing benchmarks. Non-ready Actors are simply NIL.
-   ;; Terminated Actors are :TERMINATED. Ready Actors point to the
-   ;; ready-queue)
+    :initform (list nil)) ;; CAS ref
+   ;; This is a Ref Cell for use with CAS testing and setting. Its CAR
+   ;; will be NIL when the Actor is neither in the ready queue, nor
+   ;; being executed by an Executive thread. It will be T when it is
+   ;; enqueued or while being executed.
 
    (lock
     :accessor actor-lock
@@ -240,20 +154,14 @@
    ;; Since this slot is accessible to any other thread, access to it
    ;; should be guarded by the lock.
    ;;
-   ;; Local state can be kept either in closed over lexical bindings
+   ;; Local state can be kept either in closed-over lexical bindings
    ;; in the behavior closures, or in this list. Access to state is
    ;; probably faster with lexical bindings in the closure. But state
    ;; kept here will be more easily inspected. It's up to you...
    ))
 
-(defmethod initialize-instance :after ((actor actor) &key &allow-other-keys)
-  (setf (actor-next-behavior actor) (actor-initial-behavior actor)
-        (actor-next-messages actor) (when (actor-lambda-list actor)
-                                      (actor-messages actor)))
-  (register-actor actor))
-
-(defmethod print-object ((actor actor) out-stream)
-  (format out-stream "#<ACTOR ~A>" (actor-name actor)))
+(defmethod actor-lambda-list ((actor actor))
+  (cdr (lw:function-lambda-list (actor-behavior actor))))
 
 ;; ----------------------------------------------------------
 
@@ -263,15 +171,15 @@
 
 (defmacro with-actor-values (bindings actor &body body)
   ;; get a consistent collection of actor slot values
-  (let ((syms      (mapcar #'car bindings))
-        (accessors (mapcar #'cadr bindings))
-        (g!actor   (gensym-like :actor-)))
-    `(let ((,g!actor ,actor))
-       (multiple-value-bind ,syms
-           (with-locked-actor (,g!actor)
-             (values ,@(mapcar #`(,a1 ,g!actor) accessors)))
-         ,@body))
-    ))
+  (let ((g!actor   (gensym-like :actor-)))
+    (multiple-value-bind (syms accessors)
+        (split-bindings bindings)
+      `(let ((,g!actor ,actor))
+         (multiple-value-bind ,syms
+             (with-locked-actor (,g!actor)
+               (values ,@(mapcar #`(,a1 ,g!actor) accessors)))
+           ,@body))
+      )))
 
 ;; ----------------------------------------------------------
 

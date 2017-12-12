@@ -33,44 +33,28 @@
                 on-timeout on-timeout-present-p)
         ))))
 
-(defun dlambda-clauses-p (clauses)
-  (labels ((dlambda-clause-p (clause)
-             (optima:match clause
-               ((list* _ (or (eql :WHEN)
-                             (eql :UNLESS))
-                       _ _)
-                nil)
-               ((list* kw args _) :when (and (symbolp kw)
-                                             (listp args))
-                t)
-               (_  nil))))
-    (every #'dlambda-clause-p clauses)))
-
 (defun parse-pattern-clauses (msg preamble clauses)
   `(lambda (,msg)
+     (declare (ignorable ,msg))
      ,@(when preamble
          `(,preamble))
-     ,(if (dlambda-clauses-p clauses)
-          `(um:dcase ,msg
-             ,@(mapcar (lambda (clause)
-                         (destructuring-bind (key args . body) clause
-                           `(,key ,args (lambda () ,@body))))
-                       clauses))
-        ;; else - optima clauses
-        `(optima:match ,msg  ;; returns NIL on no matching message, as we need
-           ,@(mapcar (lambda (clause)
-                       (optima:ematch clause
-                         ((list pat (or (and wen
-                                             (eql :WHEN))
-                                        (and wen
-                                             (eql :UNLESS)))
-                                pred . body)
-                          `(,pat ,wen ,pred (lambda () ,@body)))
-                         
-                         ((list pat . body)
-                          `(,pat (lambda () ,@body)))
-                         ))
-                     clauses)) )
+     (optima:match ,msg  ;; returns NIL on no matching message, as we need
+       ,@(mapcar (lambda (clause)
+                   (optima:ematch clause
+                     ((list pat :when pred . body)
+                      `(,pat (if ,pred
+                                 (lambda () ,@body)
+                               (optima:fail))))
+                     
+                     ((list pat :unless pred . body)
+                      `(,pat (if ,pred
+                                 (optima:fail)
+                               (lambda () ,@body))))
+                     
+                     ((list pat . body)
+                      `(,pat (lambda () ,@body)))
+                     ))
+                 clauses))
      ))
 
 ;; ----------------------------------------------------------------
@@ -99,6 +83,8 @@ Only works for PRINC, and FORMAT ~A not FORMAT ~S or ~W"
             (err-reason err) (err-from err))
     ))
 
+(defconstant +timeout-msg+  (gensym))
+
 (defun timed-out (self)
   "Internal routine to generate the timeout exception to the current
 process."
@@ -124,7 +110,7 @@ process."
   ;; timeout, cancels the pending timeout and initiates with the
   ;; current duration.
   (labels ((tell-him ()
-             (send actor :self-timed-out actor)))
+             (send actor +timeout-msg+)))
     (with-locked-actor (actor)
       (unschedule-timeout actor)
       (with-accessors ((its-timer  actor-timeout-timer)) actor
@@ -144,121 +130,166 @@ process."
     actor)) ;; might be helpful to act like SETF and return the actor
 
 ;; ----------------------------------------------------------------
-;; Scheduled Actors - Actors with RECV clauses. Scheduled only in the
-;; sense that they may receive a timeout message before any
-;; recognizable messages arrive. Can only happen if someone calls
-;; SCHEDULE-TIMEOUT on the Actor.
+;; Scheduled Actors - Actors with an executed RECV form. Scheduled
+;; only in the sense that they may receive a timeout message before
+;; any recognizable messages arrive. Can only happen if someone calls
+;; SCHEDULE-TIMEOUT on the Actor, or when the RECV form specifies a
+;; TIMEOUT expression.
 
-(defun handle-scheduled-actor (self msg conds-fn timeout-fn)
-  (um:dcase msg
-    (:self-timed-out (actor)
-     (when (eq actor self)
-       (funcall timeout-fn)))
-    (t (&rest _)
-       (declare (ignore _))
-       (let ((fn (funcall conds-fn msg)))
-         (when fn
-           (unschedule-timeout self)
-           (funcall fn))))
-    ))
+(defun handle-active-recv (conds-fn timeout-fn timeout-expr)
+  (let* ((self  (current-actor)))
+    ;; Until we either get a timeout or a recognizable message, the
+    ;; Actor becomes a blocking-wait agent under the Executive. Once
+    ;; either of those events occur, the Actor reverts back to passive
+    ;; mode.
+    (when timeout-expr
+      (schedule-timeout self timeout-expr))
+    ;; Go ahead and do the unthinkable...
+    ;; ... become a blocking-wait Actor
+    (block :wait-loop
+      (loop
+       (optima:match (mp:mailbox-read (actor-messages self))
+         ((list (optima:guard sym (eq sym +timeout-msg+)))
+          (return-from :wait-loop (funcall timeout-fn)))
+         
+         (msg
+          (um:when-let (fn (funcall conds-fn msg))
+            (unschedule-timeout self)
+            (return-from :wait-loop (funcall fn))))
+         ))
+      )))
 
-
-(defmacro recv (msg &rest clauses)
-  ;; a RECV uses Optima:MATCH style patterns and clauses. The only
-  ;; thing offered here by a RECV, over using OPTIMA:MATCH, is the
-  ;; possible use of an ON-TIMEOUT clause. Unlike Butterfly RECV, we
-  ;; can't specify a timeout parameter with TIMEOUT because that must
-  ;; be initiated from outside of the Actor.
+(defun handle-passive-recv (conds-fn timeout-fn)
+  (let* ((self  (current-actor)))
+    ;; redefine the Actor's behavior to be a passive message handler
+    (setf (actor-behavior self)
+          (behav (&rest msg)
+              ()
+            (optima:match msg
+              ((list (optima:guard sym (eq sym +timeout-msg+)))
+               (funcall timeout-fn))
+              
+              (_
+               (um:when-let (fn (funcall conds-fn msg))
+                 (unschedule-timeout self)
+                 (funcall fn)))
+              ))
+          )))
+                  
+(defmacro recv (msg &rest clauses &environment env)
   ;;
-  ;; Actors don't sit and wait and selectively retrieve from a
-  ;; mailbox. Rather they are handed messages by an Executive whenever
-  ;; they are allowed to run. An Actor either handles the message, or
-  ;; drops it on the floor.
+  ;; a RECV uses Optima:MATCH style patterns and clauses.
   ;;
-  ;; There is no concept of waiting for a message with timeout,
-  ;; initiated from with the Actor code. It isn't even allowed to run
-  ;; until a message is sent to it. The Executive can't be bothered
-  ;; with selective retrieval from the Actor's mailbox. That's up to
-  ;; the Actor as messages stream by.
+  ;; RECV receives and processes one qualifying message or gets timed
+  ;; out. Any messages arriving at the Actor's mailbox which do not
+  ;; qualify for any of the RECV clauses will be discarded during the
+  ;; waiting period. After RECV either times out or receives a
+  ;; qualifying message, the body forms of the Actor that follow the
+  ;; RECV form will be executed and the Actor will be using its
+  ;; original behavior on all future messages.
   ;;
-  ;; We still re-parse the handler body to create a function which
-  ;; takes a message and returns a fully deconstructed pattern match
-  ;; closure, or nil. This allows us to cancel any pending timeout if
-  ;; a message will be handled.
+  ;; If there is a TIMEOUT expression inside the RECV form, the Actor
+  ;; will setup a timeout timer on that expression, and go into a
+  ;; blocking-wait loop of reading its own message mailbox until
+  ;; either a timeout occurs or a qualifying message arrives.
+  ;; Thereafter it will revert to its original passive Actor mode, and
+  ;; continue executing the remaining forms in the body of the Actor.
   ;;
-  ;; Timeouts are initiated externally by calling SCHEDULE-TIMEOUT on
-  ;; an Actor. Only RECV Actors can respond to a timeout. If they
-  ;; handle it with an ON-TIMEOUT clause then okay, otherwise they
-  ;; will generate a timeout error, unless some recognizable message
-  ;; arrives before then.
+  ;; If there isn't a TIMEOUT expression inside the RECV form, the
+  ;; Actor could become blocked-waiting for an indefinite period,
+  ;; tying up an Executive thread.
   ;;
-  ;; This macro is supposed to handle either of Optima:MATCH or
-  ;; DLAMBDA style clauses, but not mixed together.
+  ;; We re-parse the handler body to create a function which takes a
+  ;; message and returns a fully deconstructed pattern match closure,
+  ;; or nil. This allows us to cancel any pending timeout if a message
+  ;; will be handled.
   ;;
-  (multiple-value-bind (new-clauses
+  ;; An Actor containing a RECV form will not execute that form until
+  ;; it receives some message that causes it to execute the branch of
+  ;; code containing the RECV form.
+  ;;
+   (multiple-value-bind (new-clauses
                         preamble          preamble-present-p
                         timeout-expr      timeout-present-p
                         on-timeout-clause on-timeout-present-p)
       (parse-clauses clauses)
-    (declare (ignore timeout-expr timeout-present-p preamble-present-p))
+    (declare (ignore timeout-present-p preamble-present-p))
     (let* ((conds-fn       (parse-pattern-clauses msg preamble new-clauses))
            (a!self         (anaphor 'self))
            (timeout-fn     (if on-timeout-present-p
                                `(lambda ()
                                   ,on-timeout-clause)
                              `(lambda ()
-                                (timed-out ,a!self)))))
-      `(handle-scheduled-actor ,a!self ,msg ,conds-fn ,timeout-fn))
-    ))
+                                (timed-out ,a!self)))
+                           ))
+      (ensure-self-binding
+       `(handle-active-recv ,conds-fn ,timeout-fn ,timeout-expr)
+       env)
+      )))
 
-(defmacro perform-with-timeout (msg timeout &rest clauses)
-  (let ((g!actor (gensym-like :actor-)))
-    `(let ((,g!actor (make-actor #:perform (&rest ,msg)
-                         ()
-                       (recv ,msg
-                         ,@clauses))))
-       (schedule-timeout ,g!actor ,timeout)
-       ,g!actor)
-    ))
+(defmacro become-recv (msg &rest clauses &environment env)
+  ;; if SELF is not visible when this macro is used, one will be
+  ;; provided as a local binding against (CURRENT-ACTOR).
+  (multiple-value-bind (new-clauses
+                        preamble          preamble-present-p
+                        timeout-expr      timeout-present-p
+                        on-timeout-clause on-timeout-present-p)
+      (parse-clauses clauses)
+    (declare (ignore timeout-present-p preamble-present-p))
+    (let* ((conds-fn       (parse-pattern-clauses msg preamble new-clauses))
+           (a!self         (anaphor 'self))
+           (timeout-fn     (if on-timeout-present-p
+                               `(lambda ()
+                                  ,on-timeout-clause)
+                             `(lambda ()
+                                (timed-out ,a!self)))
+                           ))
+      (ensure-self-binding
+       (if timeout-expr
+           `(progn
+              (schedule-timeout ,a!self ,timeout-expr)
+              (handle-passive-recv ,conds-fn ,timeout-fn))
+         `(handle-passive-recv ,conds-fn ,timeout-fn))
+       env)
+      )))
+
+(editor:setup-indent "recv" 1)
+(editor:setup-indent "become-recv" 1)
 
 #|
 (kill-executives)
-(defun tst (dt)
+(defunc tst (dt)
+  ;; need DEFUNC instead of DEFUN if this is eval from editor pane
   (let* ((x 15)
          (self :me!)
-         (actor (perform-with-timeout msg 2
-                                      ((list :print val) (pr val))
-                                      ((list :who)       (pr self))
-                                      ((list :quit)      (terminate))
-                                      :ON-TIMEOUT (progn
-                                                    (pr :Timed-Out!)
-                                                    (setf x 32)
-                                                    (terminate)))))
+         (actor (make-actor (&rest msg)
+                    ()
+                  (become-recv-with-timeout msg 2
+                    ((list :print val) (pr val))
+                    ((list :who)       (pr self))
+                    #||#
+                    :ON-TIMEOUT (progn
+                                  (pr :Timed-Out!)
+                                  (setf x 32))
+                    #||#
+                    ))))
     (pr actor)
-    (sleep dt)
     (send actor :who)
+    (sleep dt)
     (send actor :print :hello)
-    (send actor :quit)
     (pr x)))
-(compile 'tst)
-(tst 1)
-(let ((x (make-actor #:test (&rest msg)
+(tst 2)
+(let ((x (make-actor (&rest msg)
              ()
            (recv msg
              ((list :print val)
               (pr val))
-             ((list :quit)
-              (terminate))
-             :ON-TIMEOUT
-             (progn
-               (pr :Ouch)
-               (terminate))))
-         ))
+             :ON-TIMEOUT (pr :Ouch)
+             ))))
   (schedule-timeout x 5)
   (inspect x)
   (sleep 6)
-  (send x :print :Hello?)
-  (send x :quit))
+  (send x :print :Hello?))
 
  |#
 ;; -----------------------------------------------------------------------
@@ -367,7 +398,7 @@ process."
            (prog1
                (setf ,a!self (make-instance 'Actor
                                             :name ',name
-                                            :lambda-list '(&rest msg)
+                                            ;; :lambda-list '(&rest msg)
                                             :behav #',a!me))
              (add-actor ,a!self)))
          ))
@@ -388,8 +419,7 @@ process."
                           (:test (x)
                            (setf val x)
                            (new-state :one))
-                          (:quit ()
-                           (terminate))))
+                          ))
               
               (:one     (um:dcase msg
                           (:try (x)
@@ -417,16 +447,13 @@ process."
   (pat1 clause1)
   (pat2 clause2))
 
-(let ((x (make-actor :X (&rest msg)
+(let ((x (make-actor (&rest msg)
              ()
            (recv msg
              ((list :echo arg)
-              (print arg)
-              (terminate))
+              (print arg))
              #||#
-             :ON-TIMEOUT (progn
-                           (print "Hey! I timed out!")
-                           (terminate))
+             :ON-TIMEOUT (print "Hey! I timed out!")
              #||#
              ))))
   (schedule-timeout x 3)
@@ -447,7 +474,7 @@ process."
          (when (= *ct* 1000000)
            (print "You hit the jackpot!"))
          |#
-         (terminate)))))
+         ))))
   
   (defun tst (n)
     (setf *ct* 0)
@@ -474,26 +501,23 @@ process."
         (setf *muffle-exits* old-muffle)))))
 
 (tst #N|1_000_000|) ;; about 10 sec/1M Actors elapsed time
-(make-actor :?? () ()
-  (format t "~&*MUFFLE-EXITS* = ~A" *muffle-exits*)
-  (terminate))
+(make-actor () ()
+  (format t "~&*MUFFLE-EXITS* = ~A" *muffle-exits*))
 (kill-executives)
 ;; ---------------------------------------------------
 
-(let ((x (make-actor :x (&rest msg)
+(let ((x (make-actor (&rest msg)
              ()
              (um:dcase msg
                (:echo (arg)
                 (print arg))
                (:who ()
                 (print self))
-               (:quit ()
-                (terminate))))))
+               ))))
   (send x :echo :this)
-  (send x :who)
-  (send x :quit))
+  (send x :who))
 
-(let ((x (make-actor :x (&rest msg)
+(let ((x (make-actor (&rest msg)
              (waiting-for-response
               after-response-fn
               (backlog (hcl:make-unlocked-queue)))
@@ -502,8 +526,6 @@ process."
                              (print arg))
                             (:who ()
                              (print self))
-                            (:quit ()
-                             (terminate))
                             (:ask (from &rest question)
                              (declare (ignorable question))
                              (setf waiting-for-response (lw:mt-random (ash 1 32))

@@ -4,14 +4,6 @@
 
 (in-package :user)
 
-(defpackage #:actors-macros
-  (:use #:common-lisp)
-  (:export
-   #:gensym-like
-   #:anaphor
-   #:make-lock
-   #:with-lock))
-
 (defpackage #:actors-globals
   (:use #:common-lisp)
   (:export
@@ -37,6 +29,20 @@
    #:blind-print
    ))
 
+(defpackage #:actors-macros
+  (:use #:common-lisp
+   #:actors-globals)
+  (:export
+   #:gensym-like
+   #:anaphor
+   #:make-lock
+   #:with-lock
+   #:split-bindings
+   #:in-eval-mode-p
+   #:self-visible-p
+   #:ensure-self-binding
+   #:ensure-thread-eval))
+
 (defpackage #:actors-base
   (:use #:common-lisp
    #:actors-macros
@@ -46,12 +52,9 @@
    #:*muffle-exits*
    #:def-factory
    #:current-actor
-   #:next-message
-   #:next-time
-   #:pause
+   #:become
    #:wait
    #:reset
-   #:terminate
    #:next
    #:kill-executives
    #:send
@@ -59,6 +62,7 @@
    #:behav
    #:actor-alive-p
    #:find-actor
+   #:find-actor-name
    #:get-actors
    #:remove-actor
    #:spawn
@@ -66,20 +70,16 @@
    #:pr
 
    #:with-actor-values
-   #:actor-next-behavior
-   #:actor-initial-behavior
+   #:actor-behavior
    #:with-locked-actor
    #:ensure-executives
    #:actor
-   #:actor-name
-   #:actor-lambda-list
-   #:actor-initial-behavior
-   #:actor-next-behavior
+   #:actor-behavior
    #:actor-messages
-   #:actor-next-messages
    #:actor-residence
    #:actor-properties
-
+   #:actor-lambda-list
+   
    #:send-secondary
    #:add-actor
    
@@ -96,6 +96,8 @@
    #:ready-queue-empty-p
    #:empty-ready-queue
    #:pop-ready-queue
+
+   #:become
    ))
 
 (defpackage #:actors-data-structs
@@ -127,7 +129,7 @@
    #:schedule-timeout
    #:unschedule-timeout
    #:recv
-   #:perform-with-timeout
+   #:become-recv
    #:make-state-machine
    ))
 
@@ -142,17 +144,13 @@
   (:nicknames #:ac)
   (:export
    #:actor
-   #:actor-name
 
    #:def-factory
    #:*current-actor*
    #:current-actor
-   #:next-message
-   #:next-time
-   #:pause
+   #:become
    #:wait
    #:reset
-   #:terminate
    #:kill-executives
    #:send
    #:ask
@@ -181,11 +179,12 @@
    #:schedule-timeout
    #:unschedule-timeout
    #:recv
-   #:perform-with-timeout
+   #:become-recv
    #:make-state-machine
 
    #:get-actor-property
    #:set-actor-property
+   #:actor-lambda-list
    
    #:pr
    #:defunc
@@ -193,6 +192,8 @@
 
    #:register-actor
    #:unregister-actor
+
+   #:become
    ))
 
 (defpackage #:actors-user

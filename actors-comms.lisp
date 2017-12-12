@@ -27,18 +27,14 @@
 (defmethod acceptable-key ((name string))
   (string-upcase name))
 
-(defmethod acceptable-key ((actor actor))
-  (acceptable-key (actor-name actor)))
-
         ;;; =========== ;;;
 
-(defmethod register-actor ((actor actor))
-  (when (acceptable-key actor)
-    (send *actor-directory-manager* :register actor)))
+(defmethod register-actor ((actor actor) name)
+  (when (acceptable-key name)
+    (send *actor-directory-manager* :register actor name)))
   
-(defmethod unregister-actor ((actor actor))
-  (when (acceptable-key actor)
-    (send *actor-directory-manager* :unregister actor)))
+(defun unregister-actor (name-or-actor)
+  (send *actor-directory-manager* :unregister name-or-actor))
 
 (defun get-recorded-actors ()
   (when (directory-manager-p)
@@ -49,11 +45,9 @@
              (acceptable-key name))
     (ask *actor-directory-manager* :find name)))
 
-(defun clear-actor-directory ()
-  (send *actor-directory-manager* :clear))
-
-(defun quit-actor-directory-manager ()
-  (send (shiftf *actor-directory-manager* #'lw:do-nothing) :quit))
+(defmethod find-actor-name ((actor actor))
+  (when (directory-manager-p)
+    (ask *actor-directory-manager* :reverse-lookup actor)))
 
 ;; --------------------------------------------------------
 ;; Shared printer driver... another instance of something better
@@ -65,15 +59,6 @@
 ;; --------------------------------------------------------------------
 ;; External communication with an Actor
 
-(defun send-through-actor-mbox (actor mbox message)
-  ;; called from inside of actor lock
-  (when mbox
-    (mp:mailbox-send mbox message)
-    (when (and (null (actor-residence actor)) ;; not already on ready queue, nor :terminated
-               (eq mbox (actor-next-messages actor))) ;; did we send to what it is expecting?
-      (add-to-ready-queue actor)))
-  (values))
-
 (defmethod send (dest &rest message)
   ;; default to preserve semantics of quiet and no-hang sending
   (declare (ignore dest message))
@@ -81,13 +66,9 @@
 
 (defmethod send ((actor actor) &rest message)
   ;; send a message to an actor
-  (with-locked-actor (actor)
-    (send-through-actor-mbox actor (actor-messages actor) message)))
-
-(defmethod send-secondary ((actor actor) &rest message)
-  ;; used to support side channel comms with WAIT blocking code
-  (with-locked-actor (actor)
-    (send-through-actor-mbox actor (actor-next-messages actor) message)))
+    (mp:mailbox-send (actor-messages actor) message)
+    (add-to-ready-queue actor)
+    (values))
 
 (defmethod send ((mbox mp:mailbox) &rest message)
   ;; used by actor code to reply to ask
@@ -100,7 +81,8 @@
   (values))
 
 (defmethod send ((fn function) &rest message)
-  (apply fn message))
+  (apply fn message)
+  (values))
 
 (defmethod send ((name (eql nil)) &rest message)
   ;; handle the special symbol NIL to avoid an infinite loop
@@ -127,67 +109,35 @@
 ;; ------------------------------------------------------------
 ;; Internal routines for constructing an Actor and enabling it
 
-(defun add-actor (actor)
-  ;; internal, used by make-actor, executive process
-  ;; adds the actor to the ready / wait queue
-  (with-locked-actor (actor)
-    ;; now that we're locked, check again to be sure...
-    (cond ((actor-alive-p actor)
-           (cond ((let ((mbox (actor-next-messages actor)))
-                    (or (null mbox)
-                        (mp:mailbox-not-empty-p mbox)))
-                  ;; A null mbox results from a simple pause. Otherwise it is
-                  ;; the mailbox to which some message might have been sent
-                  (add-to-ready-queue actor))
-                 
-                 (t
-                  (setf (actor-residence actor) nil))
-                 ))
-          (t
-           (remove-actor actor))
-          )))
-
-;; --------------------------------------------------------
-;; Queue introspection
-
 (defun actor-alive-p (actor)
-  (and (actor-next-behavior actor)
+  (and (actor-behavior actor)
        actor))
     
+(defun add-actor (actor)
+  ;; internal, used by make-actor, executive process
+  ;; may add the actor to the ready queue
+  (mark-not-in-queue actor)
+  (when (mp:mailbox-not-empty-p (actor-messages actor))
+    (add-to-ready-queue actor)))
+
+;; --------------------------------------------------------
+;; Directory Introspection
+
 (defun get-actors ()
   (get-recorded-actors))
-
-(defmethod remove-actor ((actor actor))
-  ;; Be careful with this... the actor might actually be pending with
-  ;; some legitimate and important work!
-  (with-locked-actor (actor)
-    (setf (actor-residence actor)        :terminated
-          (actor-messages actor)         nil
-          (actor-next-messages actor)    nil
-          (actor-initial-behavior actor) nil
-          (actor-next-behavior actor)    nil))
-  ;; (queue-remove actor *actor-ready-queue*)
-  (unregister-actor actor))
-
-(defmethod remove-actor (name)
-  (remove-actor (find-actor name)))
 
 (defmethod find-actor ((actor actor))
   (actor-alive-p actor))
 
 (defun find-live-actor-in-directory (name)
-  (let ((actor (find-actor-in-directory name)))
-    (when actor
-      (cond ((actor-alive-p actor)
-             actor)
-            (t
-             (remove-actor actor)
-             nil)))
-    ))
+  (find-actor (find-actor-in-directory name)))
 
 (defmethod find-actor ((name string))
   (find-live-actor-in-directory name))
 
 (defmethod find-actor ((name symbol))
   (find-live-actor-in-directory name))
-             
+
+(defmethod find-actor ((actor (eql nil)))
+  nil)
+

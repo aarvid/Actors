@@ -120,14 +120,13 @@
   (send mm :add :cat :mouse)
   (send mm :add :mouse :man)
   (send mm :add :man :dog)
-  (send mm :iter (lambda (k v) (print (cons k v))))
+  (send mm :iter (lambda (k v) (pr (cons k v))))
   (prog1
-      (print
+      (pr
        (ask mm :fold  (lambda (k v a)
                         (cons (list k v) a))
             nil))
-    (print (ask mm :cardinal))
-    (remove-actor mm)
+    (pr (ask mm :cardinal))
     ))
  |#
 
@@ -223,7 +222,8 @@
 ;; -----------------------------------------------
 
 (def-factory make-shared-hash-table (&rest msg)
-    ((table (make-hash-table)))
+    ((table (make-hash-table
+             :single-thread t)))
   (um:dcase msg
     
     (:clear ()
@@ -249,10 +249,6 @@
     (:find-or-add (name val replyTo)
      (send replyTo (or (gethash name table)
                        (setf (gethash name table) val))))
-    
-    (:quit ()
-     (setf table nil)
-     (terminate))
     ))
 
   
